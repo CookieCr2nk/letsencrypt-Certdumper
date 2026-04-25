@@ -1,47 +1,42 @@
-DOMAIN=`example.com`
-LATESTPRIVKEY=`exec ls /etc/letsencrypt/archive/$DOMAIN/privkey* | sed 's/\([0-9]\+\).*/\1/g' | sort -n | tail -1`
-LATESTCHAIN=`exec ls /etc/letsencrypt/archive/$DOMAIN/chain* | sed 's/\([0-9]\+\).*/\1/g' | sort -n | tail -1`
-LATESTCERT=`exec ls /etc/letsencrypt/archive/$DOMAIN/cert* | sed 's/\([0-9]\+\).*/\1/g' | sort -n | tail -1`
+#!/bin/bash
+set -euo pipefail
 
-grep -v -F -x -f $LATESTPRIVKEY.pem /opt/mailserver/mail-data/ssl/server.key
+DOMAIN="example.com"
+ARCHIVE_DIR="/etc/letsencrypt/archive/$DOMAIN"
+SSL_DIR="/opt/mailserver/mail-data/ssl"
+RESTART=false
 
-if [ $? -eq 1 ]; then
-    echo OK
-else
-    echo UPDATE
-    cp -R $LATESTPRIVKEY.pem /opt/mailserver/mail-data/ssl/server.key
-    chown mail:mail /opt/mailserver/mail-data/ssl/server.key
-    chmod 600 /opt/mailserver/mail-data/ssl/server.key
-    RESTART=TRUE
+find_latest() {
+    ls -v "$ARCHIVE_DIR/$1"*.pem 2>/dev/null | tail -1 || true
+}
+
+update_cert() {
+    local src="$1" dst="$2"
+    if ! cmp -s "$src" "$dst" 2>/dev/null; then
+        cp "$src" "$dst"
+        chown mail:mail "$dst"
+        chmod 600 "$dst"
+        RESTART=true
+        echo "UPDATE: $(basename "$dst")"
+    else
+        echo "OK: $(basename "$dst")"
+    fi
+}
+
+PRIVKEY=$(find_latest privkey)
+CHAIN=$(find_latest chain)
+CERT=$(find_latest cert)
+
+[[ -n "$PRIVKEY" ]] || { echo "ERROR: no privkey found for $DOMAIN" >&2; exit 1; }
+[[ -n "$CHAIN" ]]   || { echo "ERROR: no chain found for $DOMAIN" >&2; exit 1; }
+[[ -n "$CERT" ]]    || { echo "ERROR: no cert found for $DOMAIN" >&2; exit 1; }
+
+update_cert "$PRIVKEY" "$SSL_DIR/server.key"
+update_cert "$CHAIN"   "$SSL_DIR/ca.crt"
+update_cert "$CERT"    "$SSL_DIR/server.crt"
+
+if $RESTART; then
+    docker compose -f /opt/mailserver/docker-compose.yml down
+    docker compose -f /opt/mailserver/docker-compose.yml up -d
+    echo "RESTART"
 fi
-
-grep -v -F -x -f $LATESTCHAIN.pem /opt/mailserver/mail-data/ssl/ca.crt
-
-if [ $? -eq 1 ]; then
-    echo OK
-else
-    echo UPDATE
-    cp -R $LATESTCHAIN.pem /opt/mailserver/mail-data/ssl/ca.crt
-    chown mail:mail /opt/mailserver/mail-data/ssl/ca.crt
-    chmod 600 /opt/mailserver/mail-data/ssl/ca.crt
-    RESTART=TRUE
-fi
-
-grep -v -F -x -f $LATESTCERT.pem /opt/mailserver/mail-data/ssl/server.crt
-
-if [ $? -eq 1 ]; then
-    echo OK
-else
-    echo UPDATE
-    cp -R $LATESTCERT.pem /opt/mailserver/mail-data/ssl/server.crt
-    chown mail:mail /opt/mailserver/mail-data/ssl/server.crt
-    chmod 600 /opt/mailserver/mail-data/ssl/server.crt
-    RESTART=TRUE
-fi
-
-if [ "$RESTART" == "TRUE" ]; then
-    cd /opt/mailserver && docker-compose down && docker-compose up -d
-    echo RESTART
-fi
-
-
